@@ -1,0 +1,1 @@
+ffmpeg -ss 00:00:10 -i data/rohit.mp4 -t 5 -c:v libx264 -c:a aac pull_shot.mp4

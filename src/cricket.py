@@ -12,94 +12,191 @@ import base64
 load_dotenv()
 
 # Get API keys from environment
-openai_api_key = os.getenv('OPENAI_API_KEY')
-gemini_api_key = os.getenv('GOOGLE_API_KEY')
+openai_api_key = os.getenv("OPENAI_API_KEY")
+gemini_api_key = os.getenv("GOOGLE_API_KEY")
 
-def analyze_frame_with_openai(frame):
+
+def analyze_video_with_openai(video_path):
+    """
+    Analyze cricket video with OpenAI GPT-4o vision model using key frames.
+    Returns comprehensive feedback on shot quality.
+    """
     if not openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY not found in environment. Please set it in your .env file.")
-    openai.api_key = openai_api_key
-    # Convert OpenCV frame (BGR) to RGB and encode as PNG in memory
-    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb)
-    img_bytes = io.BytesIO()
-    pil_img.save(img_bytes, format='PNG')
-    img_bytes.seek(0)
-    img_base64 = base64.b64encode(img_bytes.read()).decode('utf-8')
-    prompt = "Rate the quality of shot in this frame, and provide a score out of 10. Provide 1 line feedback on how to improve the shot if not 10."
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are a cricket video analyst."},
-            {"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-            ]}
-        ],
-        max_tokens=256
-    )
-    return response.choices[0].message.content.strip()
+        raise RuntimeError(
+            "OPENAI_API_KEY not found in environment. Please set it in your .env file."
+        )
 
-def analyze_frame_with_gemini(frame):
-    if not gemini_api_key:
-        raise RuntimeError("GOOGLE_API_KEY not found in environment. Please set it in your .env file.")
-    genai.configure(api_key=gemini_api_key)
-    # Convert OpenCV frame (BGR) to PIL Image (RGB)
-    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb)
-    # Use Gemini API to analyze the frame
-    model = genai.GenerativeModel('gemini-2.5-pro')
-    prompt = "Rate the quality of shot in this frame, and provide a score out of 10. Provide 1 line feedback on how to improve if not 10."
-    response = model.generate_content([
-        prompt,
-        pil_img
-    ])
-    return response.text
+    client = openai.OpenAI(api_key=openai_api_key)
 
-def process_video(input_path, output_path, frame_interval=30, provider='openai'):
-    cap = cv2.VideoCapture(input_path)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    # Extract key frames from video
+    cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Prepare to write output video using OpenCV
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    # Extract frames at regular intervals (max 10 frames for API efficiency)
+    frame_indices = [int(i * total_frames / 10) for i in range(10)]
+    frames_base64 = []
 
-    frame_idx = 0
-    feedback_cache = {}
-    while cap.isOpened():
+    for frame_idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
-        if not ret:
-            break
-        if frame_idx % frame_interval == 0:
-            print(f"Analyzing frame {frame_idx}/{total_frames}")
-            if provider == 'gemini':
-                feedback = analyze_frame_with_gemini(frame)
-            else:
-                feedback = analyze_frame_with_openai(frame)
-            feedback_cache[frame_idx] = feedback
-        else:
-            feedback = feedback_cache.get(frame_idx - (frame_idx % frame_interval), "")
-        # Overlay feedback
-        if feedback:
-            y0, dy = 30, 30
-            for i, line in enumerate(feedback.split('\n')):
-                y = y0 + i*dy
-                cv2.putText(frame, line, (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2, cv2.LINE_AA)
-        out.write(frame)
-        frame_idx += 1
+        if ret:
+            # Convert frame to base64
+            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+            img_bytes = io.BytesIO()
+            pil_img.save(img_bytes, format="PNG")
+            img_bytes.seek(0)
+            img_base64 = base64.b64encode(img_bytes.read()).decode("utf-8")
+            frames_base64.append(img_base64)
+
     cap.release()
-    out.release()
-    print(f"Output saved to {output_path}")
+
+    prompt = """Analyze this cricket shot sequence from these key frames and provide comprehensive feedback on the batting technique and shot quality. Please evaluate:
+
+1. Overall shot quality (score out of 10)
+2. Timing and footwork progression
+3. Bat swing and follow-through
+4. Balance and stance throughout
+5. Shot selection and execution
+6. Key areas for improvement
+
+Provide a concise but thorough analysis focusing on technical aspects of the batting technique across the entire sequence."""
+
+    # Create content with all frames
+    content = [{"type": "text", "text": prompt}]
+    for i, frame_b64 in enumerate(frames_base64):
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{frame_b64}"},
+            }
+        )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert cricket batting coach. Analyze the sequence of frames showing a cricket shot and provide detailed technical feedback.",
+                },
+                {"role": "user", "content": content},
+            ],
+            max_tokens=1500,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error analyzing video with OpenAI: {e}")
+        return f"Analysis failed: {str(e)}"
+
+
+def analyze_video_with_gemini(video_path):
+    """
+    Analyze entire cricket video with Google Gemini.
+    Returns comprehensive feedback on shot quality.
+    """
+    if not gemini_api_key:
+        raise RuntimeError(
+            "GOOGLE_API_KEY not found in environment. Please set it in your .env file."
+        )
+
+    genai.configure(api_key=gemini_api_key)
+
+    try:
+        # Upload video file to Gemini
+        video_file = genai.upload_file(path=video_path)
+
+        # Wait for processing
+        while video_file.state.name == "PROCESSING":
+            print("Processing video...")
+            import time
+
+            time.sleep(2)
+            video_file = genai.get_file(video_file.name)
+
+        if video_file.state.name == "FAILED":
+            raise ValueError("Video processing failed")
+
+        model = genai.GenerativeModel("gemini-2.5-pro")
+
+        prompt = """Analyze this cricket video and provide comprehensive feedback on the batting technique and shot quality. Please evaluate:
+
+1. Overall shot quality (score out of 10)
+2. Timing and footwork
+3. Bat swing and follow-through
+4. Balance and stance
+5. Shot selection and execution
+6. Key areas for improvement
+
+Provide a concise but thorough analysis focusing on technical aspects of the batting."""
+
+        response = model.generate_content([video_file, prompt])
+
+        # Clean up uploaded file
+        genai.delete_file(video_file.name)
+
+        return response.text
+    except Exception as e:
+        print(f"Error analyzing video with Gemini: {e}")
+        return f"Analysis failed: {str(e)}"
+
+
+def process_video(input_path, output_path, provider="openai"):
+    """
+    Process cricket video by sending entire video to AI for analysis.
+    Creates a copy of the original video and provides comprehensive feedback.
+    """
+    print(f"Analyzing cricket video: {input_path}")
+    print(f"Using AI provider: {provider}")
+    print("Sending entire video for analysis...")
+
+    # Copy original video to output (no modifications needed)
+    import shutil
+
+    shutil.copy2(input_path, output_path)
+    print(f"Original video copied to: {output_path}")
+
+    # Analyze entire video with selected AI provider
+    print("Starting video analysis...")
+    try:
+        if provider == "gemini":
+            feedback = analyze_video_with_gemini(input_path)
+        else:
+            feedback = analyze_video_with_openai(input_path)
+
+        # Display results
+        print(f"\n{'='*60}")
+        print("CRICKET SHOT ANALYSIS RESULTS")
+        print(f"{'='*60}")
+        print(feedback)
+        print(f"{'='*60}")
+        print(f"Original video saved to: {output_path}")
+
+        return feedback
+
+    except Exception as e:
+        error_msg = f"Video analysis failed: {str(e)}"
+        print(f"\n{'='*60}")
+        print("CRICKET SHOT ANALYSIS RESULTS")
+        print(f"{'='*60}")
+        print(error_msg)
+        print(f"{'='*60}")
+        return error_msg
+
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Analyze cricket video for shot quality and overlay feedback.")
-    parser.add_argument('input_video', help='Path to input cricket video')
-    parser.add_argument('output_video', help='Path to save annotated video')
-    parser.add_argument('--interval', type=int, default=30, help='Frame interval for analysis (default: 30)')
-    parser.add_argument('--provider', choices=['openai', 'gemini'], default='openai', help='AI provider to use (default: openai)')
+
+    parser = argparse.ArgumentParser(
+        description="Analyze entire cricket video for comprehensive shot quality feedback."
+    )
+    parser.add_argument("input_video", help="Path to input cricket video")
+    parser.add_argument("output_video", help="Path to save video copy")
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "gemini"],
+        default="openai",
+        help="AI provider to use (default: openai)",
+    )
     args = parser.parse_args()
-    process_video(args.input_video, args.output_video, args.interval, args.provider)
+    process_video(args.input_video, args.output_video, args.provider)
